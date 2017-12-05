@@ -45,7 +45,7 @@ class Cache:
         self.hit = 0
         self.miss = 0
         
-    def access(self, virtualAddress, write=False, count=True):
+    def access(self, address, write=False, count=True):
         """Access a given address.
 
         Parameters
@@ -58,9 +58,9 @@ class Cache:
         count (bool):
             Whether hit/miss rate should be counted (default is True).
         """
-        setIndex = (virtualAddress >> self.offsetBits)  % self.nSets
+        setIndex = (address >> self.offsetBits)  % self.nSets
 
-        tag = virtualAddress >> (self.setBits + self.offsetBits)
+        tag = address >> (self.setBits + self.offsetBits)
 
         if tag in self.tags[setIndex]:
             if count:
@@ -71,14 +71,20 @@ class Cache:
             if count:
                 self.miss += 1
             if self.child is not None:
-                self.child.access(virtualAddress, write, count)
+                self.child.access(address, write, count)
 
             if len(self.freeList[setIndex]) == 0:
-                self.evict(setIndex)
+                evictedTag = self.evict(setIndex)
+                #Update the last access time in the child cache (Write the data)
+                if self.child is not None:
+                    addr = (evictedTag << self.setBits) + setIndex
+                    self.child.access(addr << self.offsetBits, write=True, count=False)
             way = self.freeList[setIndex].pop()
             self.tags[setIndex][way] = tag
         
-        
+        self.accessDirect(setIndex, way)
+    
+    def accessDirect(self, setIndex, way):
         self.counter += 1
         self.lastAccess[setIndex][way] = self.counter
 
@@ -90,6 +96,7 @@ class Cache:
         """
         if way is not None:
             self.freeList[setNumber].append(way)
+            return self.tags[setNumber][way]
         else:
             index = 0
             minAccess = self.lastAccess[setNumber][0]
@@ -99,6 +106,7 @@ class Cache:
                     minAccess = self.lastAccess[setNumber][i]
             if index not in self.freeList[setNumber]:
                 self.freeList[setNumber].append(index)
+            return self.tags[setNumber][index]
 
 def test():
     L2 = Cache(size=0x100000, associativity=16)
