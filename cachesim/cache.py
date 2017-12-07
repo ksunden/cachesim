@@ -95,18 +95,23 @@ class Cache:
         If `way` is an integer, that integer is added to the free list.
         """
         if way is not None:
-            self.freeList[setNumber].append(way)
+            if way not in self.freeList[setNumber]:
+                self.freeList[setNumber].append(way)
             return self.tags[setNumber][way]
         else:
-            index = 0
-            minAccess = self.lastAccess[setNumber][0]
-            for i,acc in enumerate(self.lastAccess[setNumber]):
-                if i not in self.freeList[setNumber] and self.lastAccess[setNumber][i] < minAccess:
-                    index = i
-                    minAccess = self.lastAccess[setNumber][i]
-            if index not in self.freeList[setNumber]:
-                self.freeList[setNumber].append(index)
-            return self.tags[setNumber][index]
+            way = self.selectEviction(setNumber)
+            if way not in self.freeList[setNumber]:
+                self.freeList[setNumber].append(way)
+            return self.tags[setNumber][way]
+
+    def selectEviction(self, setNumber):
+        way = 0
+        minAccess = self.lastAccess[setNumber][0]
+        for i,acc in enumerate(self.lastAccess[setNumber]):
+            if i not in self.freeList[setNumber] and self.lastAccess[setNumber][i] < minAccess:
+                way = i
+                minAccess = self.lastAccess[setNumber][i]
+        return way
 
 def test():
     L2 = Cache(size=0x100000, associativity=16)

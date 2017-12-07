@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 import math
 import sys
-from .cache import Cache
+from cache import Cache
 
 class Hub:
     
@@ -23,7 +23,9 @@ class Hub:
         """
         self.nLines = nLines
         self.associativity = associativity
+        self.pageSize = pageSize
         self.cache = cache
+        self.eTLB = None #set in ETLB, circular refererence
 
         if self.associativity == -1:
             self.associativity = self.nLines
@@ -68,39 +70,18 @@ class Hub:
 
         tag = address >> (self.setBits + self.pageBits + self.offsetBits)
 
-        #eTLB Hit
+        # Hub Hit
         hit = False
-        for entry in self.entries[setIndex]:
-            if entry.valid and entry.vtag == tag:
+        for i,entry in enumerate(self.entries[setIndex]):
+            if entry.ptag == tag:
                 hit = True
                 loc = entry.location[pageIndex]
                 way = entry.way[pageIndex]
                 if count:
                     self.hit[loc] += 1
-                # Not in cache
-                if loc == 0:
-                    #Access to DRAM not simulated at ADDR (entry.paddr << self.offsetBits) + offset
-                    #TODO: Evict from L1
-                    #TODO: Update way information (gather from where evicted)
-                    entry.loc[pageIndex] = 2 #L1D (unified L1)
-                # In L1 (data and instruction caches unified, this needs to be split if those are split)
-                elif loc == 1 or loc == 2:
-                    cacheSetIndex = (address >> self.offsetBits) % self.cache.nSets
-                    self.cache.accessDirect(cacheSetIndex, way)
-                # In L2
-                elif loc == 3:
-                    #TODO PAddr usage
-                    cacheSetIndex = (address >> self.offsetBits) % self.hub.cache.nSets
-                    self.hub.cache.accessDirect(cacheSetIndex, way)
-                    #TODO: Evict from L1
-                    #TODO: Update way information (gather from where evicted)
-                    entry.loc[pageIndex] = 2 #L1D (unified L1)
-                # Invalid location
-                else:
-                    raise ValueError("Location in CLT is invalid, expected 2 bit int, got %d"%loc)
-                break
-        
-        #eTLB Miss
+                return entry
+
+        # Hub Miss
         if not hit:
             if count:
                 self.miss += 1
@@ -109,11 +90,10 @@ class Hub:
             if len(self.freeList[setIndex]) == 0:
                 self.evict(setIndex)
             way = self.freeList[setIndex].pop()
-            self.tags[setIndex][way] = tag
         
         
         self.counter += 1
-        self.lastAccess[setIndex][way] = self.counter
+        self.entries[setIndex][way].lastAccess = self.counter
 
     def evict(self, setNumber, way=None):
         """Evict (i.e. add to the free list) a cache line.
@@ -127,10 +107,10 @@ class Hub:
         else:
             index = 0
             minAccess = self.entries[setNumber][0].lastAccess
-            for i,acc in enumerate(self.lastAccess[setNumber]):
+            for i,acc in enumerate(self.entries[setNumber]):
                 if i not in self.freeList[setNumber] and self.entries[setNumber][i].lastAccess < minAccess:
                     index = i
-                    minAccess = self.lastAccess[setNumber][i]
+                    minAccess = self.entries[setNumber][i].lastAccess
             if index not in self.freeList[setNumber]:
                 self.freeList[setNumber].append(index)
             return index
@@ -138,7 +118,7 @@ class Hub:
 class HubEntry:
     
 
-    def __init__(pageSize=0x1000, cacheLine=64):
+    def __init__(self, pageSize=0x1000, cacheLine=64):
         self.ptag = 0
         self.eTLBValid = False
         self.instrOrData = True # Data, unused at present

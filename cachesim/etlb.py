@@ -1,13 +1,14 @@
 #! /usr/bin/env python
 import math
 import sys
-from .hub import Hub
-from .cache import Cache
+from hub import Hub
+from cache import Cache
+from tlb import TLB
 
 class ETLB:
     
 
-    def __init__(self, nLines=64, associativity=8, pageSize=0x1000, cache=None, hub=None):
+    def __init__(self, nLines=128, associativity=8, pageSize=0x1000, tlb=None, cache=None, hub=None):
         """Simple associative cache.
 
         Parameters
@@ -26,6 +27,9 @@ class ETLB:
         self.associativity = associativity
         self.hub = hub
         self.cache = cache
+        self.tlb = tlb
+        self.pageSize = pageSize
+
 
         if self.associativity == -1:
             self.associativity = self.nLines
@@ -35,14 +39,20 @@ class ETLB:
         if self.cache is None:
             self.cache = Cache(size=0x8000, associativity=16)
 
+        self.hub.eTLB = self
+
         self.cacheLine = self.cache.cacheLine
 
         self.nSets = self.nLines // self.associativity
 
         self.offsetBits = int(math.ceil(math.log2(self.cacheLine)))
+        self.wayBits = int(math.ceil(math.log2(self.associativity)))
         self.pageBits = int(math.ceil(math.log2(self.pageSize))) - self.offsetBits
         self.setBits = int(math.ceil(math.log2(self.nSets)))
         self.tagBits = 48 - self.setBits - self.pageBits - self.offsetBits
+
+        if self.tlb is None:
+            self.tlb = TLB(512, self.tagBits + self.setBits)
 
         self.freeList = [list(range(self.associativity)) for i in range(self.nSets)]
 
@@ -65,59 +75,103 @@ class ETLB:
         count (bool):
             Whether hit/miss rate should be counted (default is True).
         """
+        # Step 1 in fig2/3d
         offset = address % self.cacheLine
-        setIndex = (address >> self.offsetBits)  % self.nSets
-        pageIndex = (address >> (self.offsetBits + self.setBits)) % (1 << self.pageBits)
+        pageIndex = (address >> self.offsetBits) % (1 << self.pageBits)
+        setIndex = (address >> (self.offsetBits + self.pageBits))  % self.nSets
 
 
         tag = address >> (self.setBits + self.pageBits + self.offsetBits)
 
         #eTLB Hit
         hit = False
-        for entry in self.entries[setIndex]:
+        for i,entry in enumerate(self.entries[setIndex]):
             if entry.valid and entry.vtag == tag:
                 hit = True
                 loc = entry.location[pageIndex]
                 way = entry.way[pageIndex]
                 if count:
                     self.hit[loc] += 1
-                # Not in cache
+                # Not in cache fig2c
                 if loc == 0:
-                    #Access to DRAM not simulated at ADDR (entry.paddr << self.offsetBits) + offset
-                    #TODO: Evict from L1
-                    #TODO: Update way information (gather from where evicted)
-                    entry.loc[pageIndex] = 2 #L1D (unified L1)
-                # In L1 (data and instruction caches unified, this needs to be split if those are split)
+                    # Access to DRAM not simulated, send to CPU (step 2/3)
+                    # ((entry.paddr << self.pageBits) + pageIndex ) <<self.offsetBits) + offset
+                    # Evict from L1 (step 4)
+                    L1Set = (address >> (self.offsetBits + self.pageBits))  % self.cache.nSets
+                    if len(self.cache.freeList[L1Set]) == 0:
+                        self.evictCace(L1Set)
+                    # Update Hub pointer, place data (step 5)
+                    L1Way = self.cache.freeList[L1Set].pop()
+                    self.cache.accessDirect(L1Set, L1Way)
+                    etlbPointer = (i << self.setBits) + setIndex
+                    hubWay = 0
+                    for j in range(self.hub.associativity):
+                        if self.hub.entries[hubSet][j].eTLBPointer == etlbPointer:
+                            hubWay = 0
+                            break
+                    self.cache.tag[L1Set][L1Way] = (hubWay << self.hub.setBits) + (entry.paddr % self.hub.nSets)
+    
+                    # Update the CLT (step 6)
+                    entry.location[pageIndex] = 2 #L1D (unified L1)
+                    entry.way[pageIndex] = L1Way
+                # In L1 (data and instruction caches unified, this needs to be split if those are split) fig2a
                 elif loc == 1 or loc == 2:
+                    # access the L1 cache entry, send to CPU (step 2/3)
                     cacheSetIndex = (address >> self.offsetBits) % self.cache.nSets
                     self.cache.accessDirect(cacheSetIndex, way)
-                # In L2
+                # In L2 fig2b
                 elif loc == 3:
-                    #TODO PAddr usage
-                    cacheSetIndex = (address >> self.offsetBits) % self.hub.cache.nSets
+                    # access the L2 cache entry, send to CPU (step 2/3)
+                    cacheSetIndex = entry.paddr % self.hub.cache.nSets
                     self.hub.cache.accessDirect(cacheSetIndex, way)
-                    #TODO: Evict from L1
-                    #TODO: Update way information (gather from where evicted)
-                    entry.loc[pageIndex] = 2 #L1D (unified L1)
+                    # Evict from L1 (step 4)
+                    L1Set = (address >> (self.offsetBits + self.pageBits))  % self.cache.nSets
+                    if len(self.cache.freeList[L1Set]) == 0:
+                        self.evictCace(L1Set)
+                    # Update Hub pointer, place data (step 5)
+                    L1Way = self.cache.freeList[L1Set].pop()
+                    self.cache.accessDirect(L1Set, L1Way)
+                    self.cache.tag[L1Set][L1Way] = self.hub.cache.tags[cacheSetIndex][way]
+    
+                    # Update the CLT (step 6)
+                    entry.location[pageIndex] = 2 #L1D (unified L1)
+                    entry.way[pageIndex] = L1Way
+
+                    # Free the L2 entry so it can be used again (Only one copy, which is now in L1)
+                    self.hub.cache.evict(cacheSetIndex, way)
                 # Invalid location
                 else:
                     raise ValueError("Location in CLT is invalid, expected 2 bit int, got %d"%loc)
                 break
         
-        #eTLB Miss
+        #eTLB Miss fig3d
         if not hit:
             if count:
                 self.miss += 1
-            pass
-
+            # Evict if necessary (step 2)
             if len(self.freeList[setIndex]) == 0:
                 self.evict(setIndex)
             way = self.freeList[setIndex].pop()
-            self.tags[setIndex][way] = tag
-        
+            entry = self.entries[setIndex][way]
+
+            # Update the virtual and physical address, calling the TLB (step 3)
+            entry.vtag = tag
+            entry.paddr = self.tlb.translateVirt((tag << self.setBits) + setIndex)
+            addr = (((entry.paddr << self.pageBits) + pageIndex) << self.offsetBits) + offset
+            # access the Hub (step 4)
+            hubEntry = self.hub.access(addr, write=write, count=count)
+
+            # Copy the CLT (step 5)
+            entry.way = hubEntry.way.copy()
+            entry.location = hubEntry.location.copy()
+
+            # Update the eTLBPointer, and Valid bit (step 6)
+            hubEntry.eTLBValid = True
+            hubEnry.eTLBPointer = (way << self.setBits) + setIndex
+            self.access(address, write, count=False)
         
         self.counter += 1
-        self.lastAccess[setIndex][way] = self.counter
+        self.entries[setIndex][way].lastAccess = self.counter
 
     def evict(self, setNumber, way=None):
         """Evict (i.e. add to the free list) a cache line.
@@ -126,23 +180,79 @@ class ETLB:
         If `way` is an integer, that integer is added to the free list.
         """
         if way is not None:
-            self.freeList[setNumber].append(way)
+            if way not in self.freeList[setNumber]:
+                self.freeList[setNumber].append(way)
             return way
         else:
-            index = 0
+            way = 0
             minAccess = self.entries[setNumber][0].lastAccess
-            for i,acc in enumerate(self.lastAccess[setNumber]):
+            entry = self.entries[setNumber][0]
+            for i,ent in enumerate(self.entries[setNumber]):
                 if i not in self.freeList[setNumber] and self.entries[setNumber][i].lastAccess < minAccess:
-                    index = i
-                    minAccess = self.lastAccess[setNumber][i]
-            if index not in self.freeList[setNumber]:
-                self.freeList[setNumber].append(index)
-            return index
+                    way = i
+                    minAccess = self.entries[setNumber][i].lastAccess
+                    entry = self.entries[setNumber][i]
+
+            eTLBPointer = (setNumber << self.wayBits) + way
+            hubSet = entry.paddr % self.hub.nSets
+            hubWay = -1
+            for i in range(self.hub.associativity):
+                if self.hub.entries[i].eTLBPointer == eTLBPointer:
+                    hubWay = i
+            if hubWay == -1:
+                raise RuntimeError("Entry not in hub when expected")
+            self.hub.entries[hubSet][hubWay].location = entry.location
+            self.hub.entries[hubSet][hubWay].way = entry.way
+            self.hub.entries[hubSet][hubWay].eTLBValid = False
+
+            if way not in self.freeList[setNumber]:
+                self.freeList[setNumber].append(way)
+            return way
+
+    def evictCache(self, setNumber):
+        # Fig3f
+        # Select A Victim, acess its hub pointer (step 1)
+        way = self.cache.selectEviction(setNumber)
+        hubPointer = self.cache.tags[setNumber][way]
+
+        # Find the set (step 2)
+        L2Set = hubPointer % hub.cache.nSets
+
+        # If needed, evict a line (step 3)
+        if len(self.hub.cache.freeList[L2Set]) == 0:
+            self.hub.evictCache(L2Set)
+        # Move the data/hub pointer (step 4)
+        L2Way = hub.cache.freeList[L2Set].pop()
+        self.hub.cache.accessDirect(L2Set, L2Way)
+        self.hub.cache.tags[L2Set][L2Way] = hubPointer
+
+        # Update the active CLT (step 5)
+        hubSet = hubPointer % self.hub.nSets
+        hubWay = hubPointer >> self.hub.setBits
+
+        hubEntry = self.hub.entries[hubSet][hubWay]
+
+        if hubEntry.eTLBValid:
+            etlbSet = hubEntry.eTLBPointer % self.nSets
+            etlbWay = hubEntry.eTLBPointer >> self.setBits
+            
+            entry = self.entries[etlbSet][etlbWay]
+            for pageIndex in range(entry.nEntries):
+                if entry.location[pageIndex] == 2 and entry.location[pageIndex] == way:
+                    entry.location[pageIndex] = 3 #L2
+                    entry.way[pageIndex] = L2Way
+        else:
+            for pageIndex in range(hubEntry.nEntries):
+                if hubEntry.location[pageIndex] == 2 and entry.location[pageIndex] == way:
+                    hubEntry.location[pageIndex] = 3 #L2
+                    hubEntry.way[pageIndex] = L2Way
+        # Actually evict
+        self.cache.evict(setNumber, way)    
 
 class ETLBEntry:
     
 
-    def __init__(pageSize=0x1000, cacheLine=64):
+    def __init__(self, pageSize=0x1000, cacheLine=64):
         self.vtag = 0
         self.paddr = 0
 
@@ -157,9 +267,10 @@ class ETLBEntry:
         self.location = [0] * self.nEntries
         self.way = [0] * self.nEntries
 
+    
+
 def test():
-    L2 = Cache(size=0x100000, associativity=16)
-    L1 = Cache(size=0x8000, child=L2)
+    etlb = ETLB()
     nLines = -1
     if len(sys.argv) > 1:
         nLines = int(sys.argv[1])
@@ -172,13 +283,9 @@ def test():
     for i, line in enumerate(sys.stdin):
         if i >= skip:
             addr = int(line.split(' ')[1], 16)
-            L1.access(addr, line[0]=='W', i >= skip + warmup)
+            etlb.access(addr, line[0]=='W', i >= skip + warmup)
         if i + 1 == skip + warmup + nLines and nLines != -1:
             break
-    print("L1 hit:  %d (%0.3f)"%(L1.hit, L1.hit/(L1.counter-warmup)*100))
-    print("L1 miss: %d (%0.3f)"%(L1.miss, L1.miss/(L1.counter-warmup)*100))
-    print("L2 hit:  %d (%0.3f)"%(L2.hit, L2.hit/(L1.counter-warmup)*100))
-    print("L2 miss: %d (%0.3f)"%(L2.miss, L2.miss/(L1.counter-warmup)*100))
 
 if __name__ == '__main__':
     test()
