@@ -8,7 +8,7 @@ from tlb import TLB
 class ETLB:
     
 
-    def __init__(self, nLines=128, associativity=8, pageSize=0x1000, tlb=None, cache=None, hub=None):
+    def __init__(self, nLines=64, associativity=8, pageSize=0x1000, tlb=None, cache=None, hub=None):
         """Simple associative cache.
 
         Parameters
@@ -89,6 +89,8 @@ class ETLB:
             if entry.valid and entry.vtag == tag:
                 hit = True
                 loc = entry.location[pageIndex]
+                if loc != 2 and loc != 0:
+                   print(loc)
                 way = entry.way[pageIndex]
                 if count:
                     self.hit[loc] += 1
@@ -99,17 +101,18 @@ class ETLB:
                     # Evict from L1 (step 4)
                     L1Set = (address >> (self.offsetBits + self.pageBits))  % self.cache.nSets
                     if len(self.cache.freeList[L1Set]) == 0:
-                        self.evictCace(L1Set)
+                        self.evictCache(L1Set)
                     # Update Hub pointer, place data (step 5)
                     L1Way = self.cache.freeList[L1Set].pop()
                     self.cache.accessDirect(L1Set, L1Way)
                     etlbPointer = (i << self.setBits) + setIndex
                     hubWay = 0
+                    hubSet = entry.paddr % self.hub.nSets
                     for j in range(self.hub.associativity):
                         if self.hub.entries[hubSet][j].eTLBPointer == etlbPointer:
                             hubWay = 0
                             break
-                    self.cache.tag[L1Set][L1Way] = (hubWay << self.hub.setBits) + (entry.paddr % self.hub.nSets)
+                    self.cache.tags[L1Set][L1Way] = (hubWay << self.hub.setBits) + (entry.paddr % self.hub.nSets)
     
                     # Update the CLT (step 6)
                     entry.location[pageIndex] = 2 #L1D (unified L1)
@@ -127,11 +130,11 @@ class ETLB:
                     # Evict from L1 (step 4)
                     L1Set = (address >> (self.offsetBits + self.pageBits))  % self.cache.nSets
                     if len(self.cache.freeList[L1Set]) == 0:
-                        self.evictCace(L1Set)
+                        self.evictCache(L1Set)
                     # Update Hub pointer, place data (step 5)
                     L1Way = self.cache.freeList[L1Set].pop()
                     self.cache.accessDirect(L1Set, L1Way)
-                    self.cache.tag[L1Set][L1Way] = self.hub.cache.tags[cacheSetIndex][way]
+                    self.cache.tags[L1Set][L1Way] = self.hub.cache.tags[cacheSetIndex][way]
     
                     # Update the CLT (step 6)
                     entry.location[pageIndex] = 2 #L1D (unified L1)
@@ -142,6 +145,7 @@ class ETLB:
                 # Invalid location
                 else:
                     raise ValueError("Location in CLT is invalid, expected 2 bit int, got %d"%loc)
+                way = i
                 break
         
         #eTLB Miss fig3d
@@ -161,13 +165,30 @@ class ETLB:
             # access the Hub (step 4)
             hubEntry = self.hub.access(addr, write=write, count=count)
 
+            c = 0
+            for i in entry.location:
+                if i == 3:
+                    c+=1
+            if c>0:
+                print(c)
+
+
             # Copy the CLT (step 5)
             entry.way = hubEntry.way.copy()
             entry.location = hubEntry.location.copy()
+            entry.valid = True
+            c = 0
+            for i in entry.location:
+                if i == 3:
+                    c+=1
+            if c>0:
+                print(c)
+
+            hubSet = entry.paddr % self.hub.nSets
 
             # Update the eTLBPointer, and Valid bit (step 6)
             hubEntry.eTLBValid = True
-            hubEnry.eTLBPointer = (way << self.setBits) + setIndex
+            hubEntry.eTLBPointer = (way << self.setBits) + setIndex
             self.access(address, write, count=False)
         
         self.counter += 1
@@ -193,36 +214,38 @@ class ETLB:
                     minAccess = self.entries[setNumber][i].lastAccess
                     entry = self.entries[setNumber][i]
 
-            eTLBPointer = (setNumber << self.wayBits) + way
+            eTLBPointer = (way << self.setBits) + setNumber
             hubSet = entry.paddr % self.hub.nSets
             hubWay = -1
             for i in range(self.hub.associativity):
-                if self.hub.entries[i].eTLBPointer == eTLBPointer:
+                if self.hub.entries[hubSet][i].eTLBPointer == eTLBPointer:
                     hubWay = i
+                    break
             if hubWay == -1:
                 raise RuntimeError("Entry not in hub when expected")
-            self.hub.entries[hubSet][hubWay].location = entry.location
-            self.hub.entries[hubSet][hubWay].way = entry.way
+            self.hub.entries[hubSet][hubWay].location = entry.location.copy()
+            self.hub.entries[hubSet][hubWay].way = entry.way.copy()
             self.hub.entries[hubSet][hubWay].eTLBValid = False
 
             if way not in self.freeList[setNumber]:
                 self.freeList[setNumber].append(way)
             return way
 
-    def evictCache(self, setNumber):
+    def evictCache(self, setNumber, way=None):
         # Fig3f
         # Select A Victim, acess its hub pointer (step 1)
-        way = self.cache.selectEviction(setNumber)
+        if way == None:
+            way = self.cache.selectEviction(setNumber)
         hubPointer = self.cache.tags[setNumber][way]
 
         # Find the set (step 2)
-        L2Set = hubPointer % hub.cache.nSets
+        L2Set = hubPointer % self.hub.cache.nSets
 
         # If needed, evict a line (step 3)
         if len(self.hub.cache.freeList[L2Set]) == 0:
             self.hub.evictCache(L2Set)
         # Move the data/hub pointer (step 4)
-        L2Way = hub.cache.freeList[L2Set].pop()
+        L2Way = self.hub.cache.freeList[L2Set].pop()
         self.hub.cache.accessDirect(L2Set, L2Way)
         self.hub.cache.tags[L2Set][L2Way] = hubPointer
 
@@ -243,9 +266,15 @@ class ETLB:
                     entry.way[pageIndex] = L2Way
         else:
             for pageIndex in range(hubEntry.nEntries):
-                if hubEntry.location[pageIndex] == 2 and entry.location[pageIndex] == way:
+                if hubEntry.location[pageIndex] == 2 and hubEntry.location[pageIndex] == way:
                     hubEntry.location[pageIndex] = 3 #L2
                     hubEntry.way[pageIndex] = L2Way
+            c=0
+            for i in hubEntry.location:
+                if i ==3:
+                    c+=1
+            if c>0:
+                print(c)
         # Actually evict
         self.cache.evict(setNumber, way)    
 
@@ -270,7 +299,8 @@ class ETLBEntry:
     
 
 def test():
-    etlb = ETLB()
+    L1 = Cache(0x200)
+    etlb = ETLB(cache = L1)
     nLines = -1
     if len(sys.argv) > 1:
         nLines = int(sys.argv[1])
@@ -280,12 +310,24 @@ def test():
     warmup = 0
     if len(sys.argv) > 3:
         warmup = int(sys.argv[3])
+    counter = 0
     for i, line in enumerate(sys.stdin):
         if i >= skip:
+            counter += 1
             addr = int(line.split(' ')[1], 16)
+            #print(line, i)
             etlb.access(addr, line[0]=='W', i >= skip + warmup)
         if i + 1 == skip + warmup + nLines and nLines != -1:
             break
+    print("ETLB Hit, NIC %d, (%03f)"%(etlb.hit[0], etlb.hit[0]/(counter)*100))
+    print("ETLB Hit, L1I %d, (%03f)"%(etlb.hit[1], etlb.hit[1]/(counter)*100))
+    print("ETLB Hit, L1D %d, (%03f)"%(etlb.hit[2], etlb.hit[2]/(counter)*100))
+    print("ETLB Hit, L2  %d, (%03f)"%(etlb.hit[3], etlb.hit[3]/(counter)*100))
+    print("ETLB Miss,    %d, (%03f)"%(etlb.miss, etlb.miss/(counter)*100))
+    print("Hub Hit, NIC %d, (%03f)"%(etlb.hub.hit[0], etlb.hub.hit[0]/(counter)*100))
+    print("Hub Hit, L1  %d, (%03f)"%(etlb.hub.hit[2], etlb.hub.hit[2]/(counter)*100))
+    print("Hub Hit, L2  %d, (%03f)"%(etlb.hub.hit[3], etlb.hub.hit[3]/(counter)*100))
+    print("Hub Miss,    %d, (%03f)"%(etlb.hub.miss, etlb.hub.miss/(counter)*100))
 
 if __name__ == '__main__':
     test()
