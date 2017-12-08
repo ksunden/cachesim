@@ -89,8 +89,6 @@ class ETLB:
             if entry.valid and entry.vtag == tag:
                 hit = True
                 loc = entry.location[pageIndex]
-                if loc != 2 and loc != 0:
-                   print(loc)
                 way = entry.way[pageIndex]
                 if count:
                     self.hit[loc] += 1
@@ -109,8 +107,8 @@ class ETLB:
                     hubWay = 0
                     hubSet = entry.paddr % self.hub.nSets
                     for j in range(self.hub.associativity):
-                        if self.hub.entries[hubSet][j].eTLBPointer == etlbPointer:
-                            hubWay = 0
+                        if self.hub.entries[hubSet][j].valid and self.hub.entries[hubSet][j].eTLBPointer == etlbPointer:
+                            hubWay = j
                             break
                     self.cache.tags[L1Set][L1Way] = (hubWay << self.hub.setBits) + (entry.paddr % self.hub.nSets)
     
@@ -165,24 +163,10 @@ class ETLB:
             # access the Hub (step 4)
             hubEntry = self.hub.access(addr, write=write, count=count)
 
-            c = 0
-            for i in entry.location:
-                if i == 3:
-                    c+=1
-            if c>0:
-                print(c)
-
-
             # Copy the CLT (step 5)
             entry.way = hubEntry.way.copy()
             entry.location = hubEntry.location.copy()
             entry.valid = True
-            c = 0
-            for i in entry.location:
-                if i == 3:
-                    c+=1
-            if c>0:
-                print(c)
 
             hubSet = entry.paddr % self.hub.nSets
 
@@ -269,12 +253,6 @@ class ETLB:
                 if hubEntry.location[pageIndex] == 2 and hubEntry.location[pageIndex] == way:
                     hubEntry.location[pageIndex] = 3 #L2
                     hubEntry.way[pageIndex] = L2Way
-            c=0
-            for i in hubEntry.location:
-                if i ==3:
-                    c+=1
-            if c>0:
-                print(c)
         # Actually evict
         self.cache.evict(setNumber, way)    
 
@@ -299,8 +277,7 @@ class ETLBEntry:
     
 
 def test():
-    L1 = Cache(0x200)
-    etlb = ETLB(cache = L1)
+    etlb = ETLB()
     nLines = -1
     if len(sys.argv) > 1:
         nLines = int(sys.argv[1])
@@ -320,7 +297,6 @@ def test():
         if i + 1 == skip + warmup + nLines and nLines != -1:
             break
     print("ETLB Hit, NIC %d, (%03f)"%(etlb.hit[0], etlb.hit[0]/(counter)*100))
-    print("ETLB Hit, L1I %d, (%03f)"%(etlb.hit[1], etlb.hit[1]/(counter)*100))
     print("ETLB Hit, L1D %d, (%03f)"%(etlb.hit[2], etlb.hit[2]/(counter)*100))
     print("ETLB Hit, L2  %d, (%03f)"%(etlb.hit[3], etlb.hit[3]/(counter)*100))
     print("ETLB Miss,    %d, (%03f)"%(etlb.miss, etlb.miss/(counter)*100))

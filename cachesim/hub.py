@@ -66,15 +66,6 @@ class Hub:
         offset = address % self.cacheLine
         pageIndex = (address >> self.offsetBits) % (1 << self.pageBits)
         setIndex = (address >> (self.offsetBits + self.pageBits))  % self.nSets
-        
-        c=0
-        for i in self.entries:
-            for j in i:
-                if j.eTLBValid:
-                    c+=1
-        if c>0:
-            print("Hub NValid", c)
-
 
         tag = address >> (self.setBits + self.pageBits + self.offsetBits)
 

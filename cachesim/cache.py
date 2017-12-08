@@ -85,6 +85,8 @@ class Cache:
         self.accessDirect(setIndex, way)
     
     def accessDirect(self, setIndex, way):
+        if way in self.freeList[setIndex]:
+            self.freeList[setIndex].remove(way)
         self.counter += 1
         self.lastAccess[setIndex][way] = self.counter
 
