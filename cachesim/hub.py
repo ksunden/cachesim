@@ -32,6 +32,10 @@ class Hub:
 
         if self.cache is None:
             self.cache = Cache(size=0x100000, associativity=16)
+            self.cache.accessTime = 7
+            self.cache.tagTime = 3
+            self.cache.accessEnergy = 0.136191
+            self.cache.tagEnergy = 0.00221937
 
         self.cacheLine = self.cache.cacheLine
 
@@ -50,7 +54,7 @@ class Hub:
         self.hit = [0,0,0,0] #DRAM,L1I,L1D,L2  Note: L1 is actually a unified cache at present, for forward compatability if separate caches are ever implemented
         self.miss = 0
         
-    def access(self, address, write=False, count=True):
+    def access(self, address, write=False, count=True, countTime=None, countEnergy=None):
         """Access a given address.
 
         Parameters
@@ -68,6 +72,12 @@ class Hub:
         setIndex = (address >> (self.offsetBits + self.pageBits))  % self.nSets
 
         tag = address >> (self.setBits + self.pageBits + self.offsetBits)
+
+        if countTime is None:
+            countTime = count
+
+        if countEnergy is None:
+            countEnergy = count
 
         # Hub Hit
         hit = False
@@ -97,9 +107,9 @@ class Hub:
                     if loc == 0: # not in cache
                         pass
                     elif loc == 1 or loc == 2: # In L1, combined instr/data, split if caches split
-                        self.eTLB.evictCache(L1Set, w)
+                        self.eTLB.evictCache(L1Set, w, countEnergy=countEnergy)
                     elif loc == 3: # In L2
-                        self.evictCache(L2Set, w)
+                        self.evictCache(L2Set, w, countEnergy=countEnergy)
                 
                 etlbSet = hubEntry.eTLBPointer % self.eTLB.nSets
                 etlbWay = hubEntry.eTLBPointer >> self.eTLB.setBits
@@ -141,7 +151,7 @@ class Hub:
             self.entries[setNumber][index].eTLBValid = False
             return index
 
-    def evictCache(self, setNumber, way=None):
+    def evictCache(self, setNumber, way=None, countEnergy=True):
         # Fig3f
         # Select A Victim, acess its hub pointer (step 1)
         if way == None:
@@ -150,6 +160,7 @@ class Hub:
 
         # Move the data/hub pointer (step 4)
         # Access to DRAM not simultated
+        self.cache.accessDirect(setNumber, way, write=False, countEnergy=countEnergy)
 
         # Update the active CLT (step 5)
         hubSet = hubPointer % self.nSets
@@ -170,7 +181,7 @@ class Hub:
                 if hubEntry.location[pageIndex] == 2 and hubEntry.location[pageIndex] == way:
                     hubEntry.location[pageIndex] = 0 #NIC
         # Actually evict
-        self.cache.evict(setNumber, way)
+        self.cache.evict(setNumber, way, countEnergy=countEnergy)
 
 
 class HubEntry:

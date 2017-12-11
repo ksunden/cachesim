@@ -38,6 +38,10 @@ class ETLB:
             self.hub = Hub(associativity=self.associativity, pageSize=self.pageSize)
         if self.cache is None:
             self.cache = Cache(size=0x8000, associativity=16)
+            self.cache.accessEnergy = 0.0111033
+            self.cache.accessTime = 4
+            self.cache.tagTime = 1
+            self.cache.tagEnergy = 0.000539962
 
         self.hub.eTLB = self
 
@@ -61,8 +65,11 @@ class ETLB:
 
         self.hit = [0,0,0,0] #DRAM,L1I,L1D,L2  Note: L1 is actually a unified cache at present, for forward compatability if separate caches are ever implemented
         self.miss = 0
+        self.cycles = 0
+        self.energy = 0.
+
         
-    def access(self, address, write=False, count=True):
+    def access(self, address, write=False, count=True, countTime=None, countEnergy=None):
         """Access a given address.
 
         Parameters
@@ -80,8 +87,13 @@ class ETLB:
         pageIndex = (address >> self.offsetBits) % (1 << self.pageBits)
         setIndex = (address >> (self.offsetBits + self.pageBits))  % self.nSets
 
-
         tag = address >> (self.setBits + self.pageBits + self.offsetBits)
+
+        if countTime is None:
+            countTime = count
+
+        if countEnergy is None:
+            countEnergy = count
 
         #eTLB Hit
         hit = False
@@ -99,10 +111,10 @@ class ETLB:
                     # Evict from L1 (step 4)
                     L1Set = (address >> (self.offsetBits + self.pageBits))  % self.cache.nSets
                     if len(self.cache.freeList[L1Set]) == 0:
-                        self.evictCache(L1Set)
+                        self.evictCache(L1Set, countEnergy=countEnergy)
                     # Update Hub pointer, place data (step 5)
                     L1Way = self.cache.freeList[L1Set].pop()
-                    self.cache.accessDirect(L1Set, L1Way)
+                    self.cache.accessDirect(L1Set, L1Way, countTime=False, countEnergy=countEnergy)
                     etlbPointer = (i << self.setBits) + setIndex
                     hubWay = 0
                     hubSet = entry.paddr % self.hub.nSets
@@ -119,19 +131,19 @@ class ETLB:
                 elif loc == 1 or loc == 2:
                     # access the L1 cache entry, send to CPU (step 2/3)
                     cacheSetIndex = (address >> self.offsetBits) % self.cache.nSets
-                    self.cache.accessDirect(cacheSetIndex, way)
+                    self.cache.accessDirect(cacheSetIndex, way, countTime=countTime, countEnergy=countEnergy)
                 # In L2 fig2b
                 elif loc == 3:
                     # access the L2 cache entry, send to CPU (step 2/3)
                     cacheSetIndex = entry.paddr % self.hub.cache.nSets
-                    self.hub.cache.accessDirect(cacheSetIndex, way)
+                    self.hub.cache.accessDirect(cacheSetIndex, way, countTime=countTime, countEnergy=countEnergy)
                     # Evict from L1 (step 4)
                     L1Set = (address >> (self.offsetBits + self.pageBits))  % self.cache.nSets
                     if len(self.cache.freeList[L1Set]) == 0:
-                        self.evictCache(L1Set)
+                        self.evictCache(L1Set, countEnergy=countEnergy)
                     # Update Hub pointer, place data (step 5)
                     L1Way = self.cache.freeList[L1Set].pop()
-                    self.cache.accessDirect(L1Set, L1Way)
+                    self.cache.accessDirect(L1Set, L1Way, countTime=False, countEnergy=countEnergy)
                     self.cache.tags[L1Set][L1Way] = self.hub.cache.tags[cacheSetIndex][way]
     
                     # Update the CLT (step 6)
@@ -139,7 +151,7 @@ class ETLB:
                     entry.way[pageIndex] = L1Way
 
                     # Free the L2 entry so it can be used again (Only one copy, which is now in L1)
-                    self.hub.cache.evict(cacheSetIndex, way)
+                    self.hub.cache.evict(cacheSetIndex, way, countEnergy=countEnergy)
                 # Invalid location
                 else:
                     raise ValueError("Location in CLT is invalid, expected 2 bit int, got %d"%loc)
@@ -161,7 +173,7 @@ class ETLB:
             entry.paddr = self.tlb.translateVirt((tag << self.setBits) + setIndex)
             addr = (((entry.paddr << self.pageBits) + pageIndex) << self.offsetBits) + offset
             # access the Hub (step 4)
-            hubEntry = self.hub.access(addr, write=write, count=count)
+            hubEntry = self.hub.access(addr, write=write, count=count, countEnergy=countEnergy, countTime=countTime)
 
             # Copy the CLT (step 5)
             entry.way = hubEntry.way.copy()
@@ -173,7 +185,7 @@ class ETLB:
             # Update the eTLBPointer, and Valid bit (step 6)
             hubEntry.eTLBValid = True
             hubEntry.eTLBPointer = (way << self.setBits) + setIndex
-            self.access(address, write, count=False)
+            self.access(address, write, count=False, countEnergy=True, countTime=False)
         
         self.counter += 1
         self.entries[setIndex][way].lastAccess = self.counter
@@ -215,7 +227,7 @@ class ETLB:
                 self.freeList[setNumber].append(way)
             return way
 
-    def evictCache(self, setNumber, way=None):
+    def evictCache(self, setNumber, way=None, countEnergy=True):
         # Fig3f
         # Select A Victim, acess its hub pointer (step 1)
         if way == None:
@@ -227,10 +239,10 @@ class ETLB:
 
         # If needed, evict a line (step 3)
         if len(self.hub.cache.freeList[L2Set]) == 0:
-            self.hub.evictCache(L2Set)
+            self.hub.evictCache(L2Set, countEnergy=countEnergy)
         # Move the data/hub pointer (step 4)
         L2Way = self.hub.cache.freeList[L2Set].pop()
-        self.hub.cache.accessDirect(L2Set, L2Way)
+        self.hub.cache.accessDirect(L2Set, L2Way, countTime=False, countEnergy=countEnergy)
         self.hub.cache.tags[L2Set][L2Way] = hubPointer
 
         # Update the active CLT (step 5)
@@ -254,7 +266,7 @@ class ETLB:
                     hubEntry.location[pageIndex] = 3 #L2
                     hubEntry.way[pageIndex] = L2Way
         # Actually evict
-        self.cache.evict(setNumber, way)    
+        self.cache.evict(setNumber, way, countEnergy=countEnergy)    
 
 class ETLBEntry:
     
@@ -289,13 +301,17 @@ def test():
         warmup = int(sys.argv[3])
     counter = 0
     for i, line in enumerate(sys.stdin):
+        if line.startswith('#eof'):
+            break
         if i >= skip:
-            counter += 1
+            if i >= skip+warmup:
+                counter += 1
             addr = int(line.split(' ')[1], 16)
             #print(line, i)
             etlb.access(addr, line[0]=='W', i >= skip + warmup)
         if i + 1 == skip + warmup + nLines and nLines != -1:
             break
+    print("N:", counter)
     print("ETLB Hit, NIC %d, (%03f)"%(etlb.hit[0], etlb.hit[0]/(counter)*100))
     print("ETLB Hit, L1D %d, (%03f)"%(etlb.hit[2], etlb.hit[2]/(counter)*100))
     print("ETLB Hit, L2  %d, (%03f)"%(etlb.hit[3], etlb.hit[3]/(counter)*100))
@@ -304,6 +320,10 @@ def test():
     print("Hub Hit, L1  %d, (%03f)"%(etlb.hub.hit[2], etlb.hub.hit[2]/(counter)*100))
     print("Hub Hit, L2  %d, (%03f)"%(etlb.hub.hit[3], etlb.hub.hit[3]/(counter)*100))
     print("Hub Miss,    %d, (%03f)"%(etlb.hub.miss, etlb.hub.miss/(counter)*100))
+
+    print("Time L1: %d, L2: %d, total: %d"%(etlb.cache.cycles, etlb.hub.cache.cycles, etlb.cache.cycles+etlb.hub.cache.cycles))
+    print("Energy L1: %0.3f, L2: %0.3f, total: %0.3f"%(etlb.cache.energy, etlb.hub.cache.energy, etlb.cache.energy+etlb.hub.cache.energy))
+
 
 if __name__ == '__main__':
     test()

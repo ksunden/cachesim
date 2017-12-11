@@ -1,0 +1,11 @@
+N: 7551
+ETLB Hit, NIC 374, (4.952986)
+ETLB Hit, L1D 7100, (94.027281)
+ETLB Hit, L2  18, (0.238379)
+ETLB Miss,    59, (0.781353)
+Hub Hit, NIC 0, (0.000000)
+Hub Hit, L1  0, (0.000000)
+Hub Hit, L2  0, (0.000000)
+Hub Miss,    59, (0.781353)
+Time L1: 28400, L2: 490, total: 28890
+Energy L1: 83.951, L2: 37.472, total: 121.423
